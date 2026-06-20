@@ -13,10 +13,13 @@ const email = ref('')
 const password = ref('')
 const showPassword = ref(false)
 const loading = ref(false)
+const errorMessage = ref('')
 
 async function handleLogin() {
+  errorMessage.value = ''
   if (!email.value || !password.value) {
-    toast.error('Veuillez remplir tous les champs')
+    errorMessage.value = 'Veuillez remplir tous les champs'
+    toast.error(errorMessage.value)
     return
   }
   loading.value = true
@@ -26,7 +29,8 @@ async function handleLogin() {
     const redirect = (route.query.redirect as string) || '/dashboard'
     router.push(redirect)
   } catch (err: any) {
-    toast.error(err.message || 'Échec de la connexion')
+    errorMessage.value = err.message || 'Échec de la connexion'
+    toast.error(errorMessage.value)
   } finally {
     loading.value = false
   }
@@ -45,6 +49,11 @@ async function handleSocialLogin(provider: 'google' | 'github') {
   <div>
     <h2 class="text-2xl font-bold text-surface-900 mb-2">Bon retour ! 👋</h2>
     <p class="text-surface-500 mb-8">Connectez-vous à votre compte EventSphere</p>
+
+    <!-- Error display -->
+    <div v-if="errorMessage" class="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm mb-4">
+      {{ errorMessage }}
+    </div>
 
     <form @submit.prevent="handleLogin" class="space-y-5">
       <!-- Email -->

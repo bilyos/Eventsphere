@@ -14,6 +14,7 @@ const password = ref('')
 const showPassword = ref(false)
 const loading = ref(false)
 const acceptTerms = ref(false)
+const errorMessage = ref('')
 
 const passwordChecks = [
   { label: '8 caractères minimum', test: (p: string) => p.length >= 8 },
@@ -22,16 +23,20 @@ const passwordChecks = [
 ]
 
 async function handleSignup() {
+  errorMessage.value = ''
   if (!fullName.value || !email.value || !password.value) {
-    toast.error('Veuillez remplir tous les champs')
+    errorMessage.value = 'Veuillez remplir tous les champs'
+    toast.error(errorMessage.value)
     return
   }
   if (!acceptTerms.value) {
-    toast.error('Veuillez accepter les conditions')
+    errorMessage.value = 'Veuillez accepter les conditions d\'utilisation'
+    toast.error(errorMessage.value)
     return
   }
   if (password.value.length < 8) {
-    toast.error('Le mot de passe doit contenir au moins 8 caractères')
+    errorMessage.value = 'Le mot de passe doit contenir au moins 8 caractères'
+    toast.error(errorMessage.value)
     return
   }
   loading.value = true
@@ -40,7 +45,8 @@ async function handleSignup() {
     toast.success('Compte créé ! Vérifiez votre email.')
     router.push('/auth/login')
   } catch (err: any) {
-    toast.error(err.message || 'Échec de l\'inscription')
+    errorMessage.value = err.message || 'Échec de l\'inscription'
+    toast.error(errorMessage.value)
   } finally {
     loading.value = false
   }
@@ -51,6 +57,11 @@ async function handleSignup() {
   <div>
     <h2 class="text-2xl font-bold text-surface-900 mb-2">Créer un compte</h2>
     <p class="text-surface-500 mb-8">Rejoignez EventSphere et créez des événements incroyables</p>
+
+    <!-- Error display -->
+    <div v-if="errorMessage" class="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm mb-4">
+      {{ errorMessage }}
+    </div>
 
     <form @submit.prevent="handleSignup" class="space-y-5">
       <!-- Full Name -->

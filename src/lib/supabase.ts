@@ -5,12 +5,12 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.warn('Supabase credentials missing – running in demo mode')
+  console.error('[EventSphere] VITE_SUPABASE_URL ou VITE_SUPABASE_ANON_KEY manquant ! Auth ne fonctionnera pas.')
 }
 
 export const supabase = createClient<Database>(
-  supabaseUrl || 'https://demo.supabase.co',
-  supabaseAnonKey || 'demo-key',
+  supabaseUrl || 'https://placeholder.supabase.co',
+  supabaseAnonKey || 'placeholder-key',
   {
     auth: {
       autoRefreshToken: true,
