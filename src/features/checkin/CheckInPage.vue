@@ -1,64 +1,152 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { toast } from 'vue-sonner'
+import { Html5Qrcode } from 'html5-qrcode'
 import {
-  QrCode, CheckCircle, XCircle, Users, Ticket,
-  Camera, CameraOff, History, AlertTriangle, Wifi
+  CheckCircle, XCircle, Users, Ticket,
+  Camera, CameraOff, History, AlertTriangle, Wifi, Keyboard,
 } from 'lucide-vue-next'
+import { useTicketsStore } from '@/stores/tickets'
+import { useAuthStore } from '@/stores/auth'
+import { useEventsStore } from '@/stores/events'
+import { formatDate } from '@/lib/utils'
 
 const route = useRoute()
+const store = useTicketsStore()
+const events = useEventsStore()
+const auth = useAuthStore()
+
+const eventId = route.params.eventId as string
+const READER_ID = 'qr-reader'
+
 const scanning = ref(false)
+const processing = ref(false)
+const manualCode = ref('')
 const scanResult = ref<null | { success: boolean; name: string; ticketType: string; message: string }>(null)
-const totalScanned = ref(847)
-const totalTickets = ref(1250)
-const recentScans = ref([
-  { name: 'Marie Nguemo', type: 'VIP', time: 'Il y a 2 min', success: true },
-  { name: 'Jean-Pierre Kamga', type: 'Standard', time: 'Il y a 5 min', success: true },
-  { name: 'Ticket #EVS-003', type: 'Standard', time: 'Il y a 8 min', success: false, reason: 'Déjà scanné' },
-  { name: 'Aminata Diallo', type: 'VIP', time: 'Il y a 12 min', success: true },
-  { name: 'Paul Mbarga', type: 'Standard', time: 'Il y a 15 min', success: true },
-])
+const recentScans = ref<{ name: string; type: string; time: string; success: boolean; reason?: string }[]>([])
 
-function toggleScanner() {
-  scanning.value = !scanning.value
-  if (scanning.value) {
-    setTimeout(() => simulateScan(), 3000)
+let scanner: Html5Qrcode | null = null
+let lastCode = ''
+let lastCodeAt = 0
+let resultTimer: ReturnType<typeof setTimeout> | null = null
+
+const totalTickets = computed(() => store.eventTickets.length)
+const totalScanned = computed(() => store.eventTickets.filter(t => t.status === 'used').length)
+const checkInRate = computed(() =>
+  totalTickets.value ? Math.round((totalScanned.value / totalTickets.value) * 100) : 0,
+)
+const eventTitle = computed(() => events.currentEvent?.title ?? '')
+
+function showResult(success: boolean, name: string, ticketType: string, message: string) {
+  scanResult.value = { success, name, ticketType, message }
+  if (resultTimer) clearTimeout(resultTimer)
+  resultTimer = setTimeout(() => (scanResult.value = null), 3000)
+}
+
+async function handleCode(raw: string) {
+  // html5-qrcode déclenche en continu tant que le QR est dans le cadre.
+  const now = Date.now()
+  if (processing.value) return
+  if (raw === lastCode && now - lastCodeAt < 4000) return
+  lastCode = raw
+  lastCodeAt = now
+
+  if (!auth.user) return
+  processing.value = true
+  try {
+    const result = await store.checkIn(raw, eventId, auth.user.id)
+    const name = result.ticket?.attendee?.full_name || result.ticket?.attendee?.email || 'Participant'
+    const type = result.ticket?.ticket_type?.name ?? '—'
+
+    if (result.success) {
+      showResult(true, name, type, 'Billet validé')
+      recentScans.value.unshift({ name, type, time: 'À l\'instant', success: true })
+      toast.success('Check-in validé !')
+    } else {
+      showResult(false, name, type, result.reason ?? 'Billet refusé')
+      recentScans.value.unshift({ name, type, time: 'À l\'instant', success: false, reason: result.reason ?? undefined })
+      toast.error(result.reason ?? 'Billet refusé')
+    }
+    recentScans.value = recentScans.value.slice(0, 20)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Erreur de validation'
+    showResult(false, 'Erreur', '—', message)
+    toast.error(message)
+  } finally {
+    processing.value = false
   }
 }
 
-function simulateScan() {
-  if (!scanning.value) return
-  const names = ['Sophie Ekambi', 'David Fotso', 'Claire Ngo', 'Bernard Atangana']
-  const types = ['Standard', 'VIP', 'Early Bird']
-  const success = Math.random() > 0.2
-
-  scanResult.value = {
-    success,
-    name: names[Math.floor(Math.random() * names.length)],
-    ticketType: types[Math.floor(Math.random() * types.length)],
-    message: success ? 'Billet validé avec succès' : 'Billet déjà utilisé',
+async function startScanner() {
+  try {
+    scanner = new Html5Qrcode(READER_ID)
+    await scanner.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 240, height: 240 } },
+      decoded => void handleCode(decoded),
+      () => {
+        // Aucune correspondance sur cette frame : cas normal, on ignore.
+      },
+    )
+    scanning.value = true
+  } catch (err: unknown) {
+    scanning.value = false
+    scanner = null
+    toast.error(
+      err instanceof Error
+        ? `Caméra indisponible : ${err.message}`
+        : 'Impossible d\'accéder à la caméra',
+    )
   }
-
-  if (success) {
-    totalScanned.value++
-    toast.success('Check-in validé !')
-  } else {
-    toast.error('Billet invalide')
-  }
-
-  recentScans.value.unshift({
-    name: scanResult.value.name,
-    type: scanResult.value.ticketType,
-    time: 'À l\'instant',
-    success,
-    reason: success ? undefined : 'Déjà scanné',
-  })
-
-  setTimeout(() => {
-    scanResult.value = null
-  }, 3000)
 }
+
+async function stopScanner() {
+  if (!scanner) return
+  try {
+    await scanner.stop()
+    scanner.clear()
+  } catch {
+    // le scanner était déjà arrêté
+  }
+  scanner = null
+  scanning.value = false
+}
+
+async function toggleScanner() {
+  if (scanning.value) await stopScanner()
+  else await startScanner()
+}
+
+async function submitManualCode() {
+  if (!manualCode.value.trim()) return
+  await handleCode(manualCode.value)
+  manualCode.value = ''
+}
+
+async function loadHistory() {
+  await store.fetchEventTickets(eventId)
+  recentScans.value = store.eventTickets
+    .filter(t => t.status === 'used' && t.checked_in_at)
+    .sort((a, b) => (b.checked_in_at ?? '').localeCompare(a.checked_in_at ?? ''))
+    .slice(0, 20)
+    .map(t => ({
+      name: t.attendee?.full_name || t.attendee?.email || 'Participant',
+      type: t.ticket_type?.name ?? '—',
+      time: formatDate(t.checked_in_at as string, 'relative'),
+      success: true,
+    }))
+}
+
+onMounted(async () => {
+  if (!auth.initialized) await auth.initialize()
+  await Promise.all([events.fetchEvent(eventId), loadHistory()])
+})
+
+onUnmounted(() => {
+  if (resultTimer) clearTimeout(resultTimer)
+  void stopScanner()
+})
 </script>
 
 <template>
@@ -66,7 +154,7 @@ function simulateScan() {
     <div>
       <h1 class="text-2xl font-bold text-surface-900">Check-in en direct</h1>
       <p class="text-surface-500 mt-1 flex items-center gap-2">
-        <Wifi class="w-4 h-4 text-emerald-500" /> Temps réel activé
+        <Wifi class="w-4 h-4 text-emerald-500" /> {{ eventTitle || 'Chargement…' }}
       </p>
     </div>
 
@@ -84,7 +172,7 @@ function simulateScan() {
       </div>
       <div class="card-premium p-6 text-center">
         <CheckCircle class="w-8 h-8 text-emerald-500 mx-auto mb-2" />
-        <p class="text-3xl font-bold text-surface-900">{{ Math.round((totalScanned / totalTickets) * 100) }}%</p>
+        <p class="text-3xl font-bold text-surface-900">{{ checkInRate }}%</p>
         <p class="text-sm text-surface-500">Taux check-in</p>
       </div>
     </div>
@@ -95,19 +183,10 @@ function simulateScan() {
         <h2 class="text-lg font-bold text-surface-900 mb-4">Scanner QR</h2>
 
         <div class="relative aspect-square max-w-sm mx-auto bg-surface-900 rounded-2xl overflow-hidden mb-6">
-          <div v-if="scanning" class="w-full h-full flex items-center justify-center">
-            <div class="absolute inset-0 flex items-center justify-center">
-              <div class="w-48 h-48 border-2 border-white/50 rounded-2xl relative">
-                <div class="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-primary-400 rounded-tl-lg" />
-                <div class="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-primary-400 rounded-tr-lg" />
-                <div class="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-primary-400 rounded-bl-lg" />
-                <div class="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-primary-400 rounded-br-lg" />
-                <div class="absolute left-0 right-0 h-0.5 bg-primary-400 animate-[scan_2s_ease-in-out_infinite]" style="animation: scan 2s ease-in-out infinite" />
-              </div>
-            </div>
-            <Camera class="w-10 h-10 text-white/30" />
-          </div>
-          <div v-else class="w-full h-full flex flex-col items-center justify-center text-white/50">
+          <!-- html5-qrcode injecte le flux vidéo ici -->
+          <div :id="READER_ID" class="w-full h-full [&_video]:w-full [&_video]:h-full [&_video]:object-cover" />
+
+          <div v-if="!scanning" class="absolute inset-0 flex flex-col items-center justify-center text-white/50">
             <CameraOff class="w-12 h-12 mb-3" />
             <p class="text-sm">Scanner désactivé</p>
           </div>
@@ -131,6 +210,20 @@ function simulateScan() {
           <component :is="scanning ? CameraOff : Camera" class="w-5 h-5" />
           {{ scanning ? 'Arrêter le scan' : 'Démarrer le scan' }}
         </button>
+
+        <!-- Saisie manuelle : indispensable si la caméra est refusée -->
+        <form @submit.prevent="submitManualCode" class="mt-4 flex gap-2">
+          <div class="relative flex-1">
+            <Keyboard class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-surface-400" />
+            <input
+              v-model="manualCode"
+              type="text"
+              placeholder="Saisir le code du billet"
+              class="input-field pl-10 !py-2.5 text-sm"
+            />
+          </div>
+          <button type="submit" :disabled="processing" class="btn-secondary !py-2.5">Valider</button>
+        </form>
       </div>
 
       <!-- Recent scans -->
@@ -140,8 +233,11 @@ function simulateScan() {
             <History class="w-5 h-5 text-surface-400" /> Scans récents
           </h2>
         </div>
+        <p v-if="!recentScans.length" class="text-sm text-surface-500 py-8 text-center">
+          Aucun check-in pour le moment.
+        </p>
         <div class="space-y-3">
-          <div v-for="scan in recentScans" :key="scan.name + scan.time" class="flex items-center gap-4 p-3 rounded-xl bg-surface-50">
+          <div v-for="(scan, i) in recentScans" :key="scan.name + scan.time + i" class="flex items-center gap-4 p-3 rounded-xl bg-surface-50">
             <div :class="['w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0', scan.success ? 'bg-emerald-100' : 'bg-red-100']">
               <component :is="scan.success ? CheckCircle : AlertTriangle" :class="['w-4 h-4', scan.success ? 'text-emerald-600' : 'text-red-600']" />
             </div>
@@ -156,10 +252,3 @@ function simulateScan() {
     </div>
   </div>
 </template>
-
-<style scoped>
-@keyframes scan {
-  0%, 100% { top: 10%; }
-  50% { top: 85%; }
-}
-</style>

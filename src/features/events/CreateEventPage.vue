@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { toast } from 'vue-sonner'
 import {
-  Image, MapPin, Calendar, Users, Tag, DollarSign,
-  Globe, Lock, ArrowLeft, ArrowRight, Loader2, Check, Upload
+  MapPin, Tag, DollarSign,
+  Globe, Lock, ArrowLeft, ArrowRight, Loader2, Check, Upload,
 } from 'lucide-vue-next'
+import { useEventsStore, type EventFormValues, type TicketTypeFormValues } from '@/stores/events'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
+const store = useEventsStore()
+const auth = useAuthStore()
+const { categories } = storeToRefs(store)
+
 const currentStep = ref(0)
 const loading = ref(false)
+const uploading = ref(false)
+const bannerInput = ref<HTMLInputElement | null>(null)
 
 const steps = [
   { label: 'Informations', icon: Tag },
@@ -18,10 +27,10 @@ const steps = [
   { label: 'Publication', icon: Globe },
 ]
 
-const form = ref({
+const form = ref<EventFormValues>({
   title: '',
   description: '',
-  category: '',
+  categoryId: '',
   bannerUrl: '',
   venue: '',
   address: '',
@@ -35,9 +44,13 @@ const form = ref({
   tags: '',
 })
 
-const ticketTypes = ref([
+const ticketTypes = ref<TicketTypeFormValues[]>([
   { name: 'Standard', price: 10000, quantity: 100, description: '' },
 ])
+
+const categoryLabel = computed(
+  () => categories.value.find(c => c.id === form.value.categoryId)?.name ?? '',
+)
 
 function addTicketType() {
   ticketTypes.value.push({ name: '', price: 0, quantity: 50, description: '' })
@@ -47,7 +60,36 @@ function removeTicketType(index: number) {
   ticketTypes.value.splice(index, 1)
 }
 
+/** Renvoie le message d'erreur de l'étape, ou null si elle est valide. */
+function validateStep(step: number): string | null {
+  const f = form.value
+  if (step === 0) {
+    if (!f.title.trim()) return 'Le titre est obligatoire'
+    if (!f.categoryId) return 'Choisissez une catégorie'
+    if (!f.description.trim()) return 'La description est obligatoire'
+  }
+  if (step === 1) {
+    if (!f.startDate || !f.startTime) return 'La date et l\'heure de début sont obligatoires'
+    if (!f.endDate || !f.endTime) return 'La date et l\'heure de fin sont obligatoires'
+    if (new Date(`${f.endDate}T${f.endTime}`) <= new Date(`${f.startDate}T${f.startTime}`)) {
+      return 'La fin doit être après le début'
+    }
+    if (!f.venue.trim()) return 'Le nom du lieu est obligatoire'
+    if (!f.address.trim()) return 'L\'adresse est obligatoire'
+  }
+  if (step === 2 && !f.isFree) {
+    const valid = ticketTypes.value.filter(t => t.name.trim() && t.quantity > 0)
+    if (!valid.length) return 'Ajoutez au moins un type de billet valide'
+  }
+  return null
+}
+
 function nextStep() {
+  const error = validateStep(currentStep.value)
+  if (error) {
+    toast.error(error)
+    return
+  }
   if (currentStep.value < steps.length - 1) currentStep.value++
 }
 
@@ -55,17 +97,57 @@ function prevStep() {
   if (currentStep.value > 0) currentStep.value--
 }
 
-async function handlePublish() {
-  loading.value = true
-  await new Promise(r => setTimeout(r, 1500))
-  loading.value = false
-  toast.success('Événement créé avec succès !')
-  router.push('/dashboard/events')
+async function onBannerSelected(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file || !auth.user) return
+  if (file.size > 5 * 1024 * 1024) {
+    toast.error('Image trop lourde (5 Mo maximum)')
+    return
+  }
+  uploading.value = true
+  try {
+    form.value.bannerUrl = await store.uploadBanner(file, auth.user.id)
+    toast.success('Bannière téléversée')
+  } catch (err: unknown) {
+    toast.error(err instanceof Error ? err.message : 'Téléversement impossible')
+  } finally {
+    uploading.value = false
+  }
 }
 
-const categories = [
-  'Conférence', 'Concert', 'Workshop', 'Gala', 'Sport', 'Art & Culture', 'Networking', 'Formation'
-]
+async function submit(status: 'draft' | 'published') {
+  for (let i = 0; i < steps.length - 1; i++) {
+    const error = validateStep(i)
+    if (error) {
+      currentStep.value = i
+      toast.error(error)
+      return
+    }
+  }
+  if (!auth.user) {
+    toast.error('Vous devez être connecté')
+    return
+  }
+
+  loading.value = true
+  try {
+    const types = form.value.isFree
+      ? [{ name: 'Entrée libre', price: 0, quantity: form.value.capacity, description: '' }]
+      : ticketTypes.value
+    await store.createEvent(auth.user.id, form.value, types, status)
+    toast.success(status === 'published' ? 'Événement publié !' : 'Brouillon enregistré')
+    router.push('/dashboard/events')
+  } catch (err: unknown) {
+    toast.error(err instanceof Error ? err.message : 'Création impossible')
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(async () => {
+  if (!auth.initialized) await auth.initialize()
+  await store.fetchCategories()
+})
 </script>
 
 <template>
@@ -98,9 +180,9 @@ const categories = [
       </div>
       <div>
         <label class="block text-sm font-medium text-surface-700 mb-2">Catégorie *</label>
-        <select v-model="form.category" class="input-field">
+        <select v-model="form.categoryId" class="input-field">
           <option value="">Sélectionner une catégorie</option>
-          <option v-for="cat in categories" :key="cat" :value="cat">{{ cat }}</option>
+          <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
         </select>
       </div>
       <div>
@@ -109,9 +191,17 @@ const categories = [
       </div>
       <div>
         <label class="block text-sm font-medium text-surface-700 mb-2">Bannière</label>
-        <div class="border-2 border-dashed border-surface-200 rounded-xl p-10 text-center hover:border-primary-400 transition-colors cursor-pointer">
-          <Upload class="w-8 h-8 text-surface-400 mx-auto mb-3" />
-          <p class="text-sm text-surface-500">Glissez une image ou <span class="text-primary-600 font-semibold">parcourez</span></p>
+        <input ref="bannerInput" type="file" accept="image/*" class="hidden" @change="onBannerSelected" />
+        <div
+          @click="bannerInput?.click()"
+          class="border-2 border-dashed border-surface-200 rounded-xl p-10 text-center hover:border-primary-400 transition-colors cursor-pointer"
+        >
+          <img v-if="form.bannerUrl" :src="form.bannerUrl" alt="" class="max-h-40 mx-auto rounded-lg object-cover mb-3" />
+          <Loader2 v-else-if="uploading" class="w-8 h-8 text-primary-500 mx-auto mb-3 animate-spin" />
+          <Upload v-else class="w-8 h-8 text-surface-400 mx-auto mb-3" />
+          <p class="text-sm text-surface-500">
+            {{ form.bannerUrl ? 'Cliquez pour remplacer l\'image' : 'Cliquez pour choisir une image' }}
+          </p>
           <p class="text-xs text-surface-400 mt-1">PNG, JPG jusqu'à 5MB — 1200x600 recommandé</p>
         </div>
       </div>
@@ -219,7 +309,7 @@ const categories = [
         <h3 class="font-bold text-surface-900 mb-4">Résumé</h3>
         <dl class="space-y-3 text-sm">
           <div class="flex justify-between"><dt class="text-surface-500">Titre</dt><dd class="font-medium text-surface-900">{{ form.title || '—' }}</dd></div>
-          <div class="flex justify-between"><dt class="text-surface-500">Catégorie</dt><dd class="font-medium text-surface-900">{{ form.category || '—' }}</dd></div>
+          <div class="flex justify-between"><dt class="text-surface-500">Catégorie</dt><dd class="font-medium text-surface-900">{{ categoryLabel || '—' }}</dd></div>
           <div class="flex justify-between"><dt class="text-surface-500">Date</dt><dd class="font-medium text-surface-900">{{ form.startDate || '—' }}</dd></div>
           <div class="flex justify-between"><dt class="text-surface-500">Lieu</dt><dd class="font-medium text-surface-900">{{ form.venue || '—' }}</dd></div>
           <div class="flex justify-between"><dt class="text-surface-500">Capacité</dt><dd class="font-medium text-surface-900">{{ form.capacity }}</dd></div>
@@ -238,10 +328,15 @@ const categories = [
       <button v-if="currentStep < steps.length - 1" @click="nextStep" class="btn-primary">
         Suivant <ArrowRight class="w-4 h-4" />
       </button>
-      <button v-else @click="handlePublish" :disabled="loading" class="btn-primary">
-        <Loader2 v-if="loading" class="w-4 h-4 animate-spin" />
-        <template v-else><Check class="w-4 h-4" /> Publier l'événement</template>
-      </button>
+      <div v-else class="flex items-center gap-3">
+        <button @click="submit('draft')" :disabled="loading" class="btn-secondary">
+          Enregistrer en brouillon
+        </button>
+        <button @click="submit('published')" :disabled="loading" class="btn-primary">
+          <Loader2 v-if="loading" class="w-4 h-4 animate-spin" />
+          <template v-else><Check class="w-4 h-4" /> Publier l'événement</template>
+        </button>
+      </div>
     </div>
   </div>
 </template>

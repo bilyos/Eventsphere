@@ -29,7 +29,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
   }
 
   async function markAsRead(id: string) {
-    await supabase.from('notifications').update({ read: true } as any).eq('id', id)
+    await supabase.from('notifications').update({ read: true }).eq('id', id)
     const n = notifications.value.find(n => n.id === id)
     if (n) n.read = true
   }
@@ -39,7 +39,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
     if (!auth.user) return
     await supabase
       .from('notifications')
-      .update({ read: true } as any)
+      .update({ read: true })
       .eq('user_id', auth.user.id)
       .eq('read', false)
     notifications.value.forEach(n => (n.read = true))

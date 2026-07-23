@@ -1,19 +1,46 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { CreditCard, Smartphone, DollarSign, ArrowUpRight, Calendar, CheckCircle, Clock, XCircle } from 'lucide-vue-next'
+import { computed, onMounted } from 'vue'
+import { storeToRefs } from 'pinia'
+import { CreditCard, Smartphone, DollarSign, Calendar, CheckCircle, Clock, XCircle } from 'lucide-vue-next'
+import { useTicketsStore } from '@/stores/tickets'
+import { useAuthStore } from '@/stores/auth'
+import { formatDate } from '@/lib/utils'
 
-const payments = ref([
-  { id: 'PAY-001', event: 'Douala Tech Summit 2026', amount: '50 000 XAF', method: 'card', status: 'completed', date: '10 Jun 2026', reference: 'EVS-PAY-2026-001' },
-  { id: 'PAY-002', event: 'Afro Music Festival', amount: '10 000 XAF', method: 'orange_money', status: 'completed', date: '8 Jun 2026', reference: 'EVS-PAY-2026-002' },
-  { id: 'PAY-003', event: 'Workshop Python', amount: '5 000 XAF', method: 'mtn_momo', status: 'pending', date: '5 Jun 2026', reference: 'EVS-PAY-2026-003' },
-])
+const store = useTicketsStore()
+const auth = useAuthStore()
+const { payments: rows, loading } = storeToRefs(store)
+
+const payments = computed(() =>
+  rows.value.map(p => ({
+    id: p.id,
+    event: p.event?.title ?? 'Événement supprimé',
+    amount: new Intl.NumberFormat('fr-FR').format(Number(p.amount)) + ' ' + p.currency,
+    method: p.method,
+    status: p.status,
+    date: formatDate(p.created_at),
+    reference: p.reference,
+  })),
+)
+
+const totalSpent = computed(() =>
+  rows.value
+    .filter(p => p.status === 'completed')
+    .reduce((sum, p) => sum + Number(p.amount), 0),
+)
+const pendingCount = computed(() => rows.value.filter(p => p.status === 'pending').length)
 
 const methodLabels: Record<string, string> = { card: 'Carte', orange_money: 'Orange Money', mtn_momo: 'MTN MoMo', paypal: 'PayPal' }
 const statusConfig: Record<string, { label: string; color: string; icon: typeof CheckCircle }> = {
   completed: { label: 'Complété', color: 'text-emerald-600 bg-emerald-50', icon: CheckCircle },
   pending: { label: 'En attente', color: 'text-amber-600 bg-amber-50', icon: Clock },
   failed: { label: 'Échoué', color: 'text-red-600 bg-red-50', icon: XCircle },
+  refunded: { label: 'Remboursé', color: 'text-surface-600 bg-surface-100', icon: XCircle },
 }
+
+onMounted(async () => {
+  if (!auth.initialized) await auth.initialize()
+  if (auth.user) await store.fetchMyPayments(auth.user.id)
+})
 </script>
 
 <template>
@@ -26,21 +53,18 @@ const statusConfig: Record<string, { label: string; color: string; icon: typeof 
     <!-- Stats -->
     <div class="grid sm:grid-cols-3 gap-4">
       <div class="card-premium p-6">
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center"><DollarSign class="w-5 h-5 text-emerald-600" /></div>
-          <div class="flex items-center gap-1 text-xs font-semibold text-emerald-600"><ArrowUpRight class="w-3 h-3" /> +12%</div>
-        </div>
-        <p class="text-2xl font-bold text-surface-900">65 000 XAF</p>
+        <div class="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center mb-3"><DollarSign class="w-5 h-5 text-emerald-600" /></div>
+        <p class="text-2xl font-bold text-surface-900">{{ new Intl.NumberFormat('fr-FR').format(totalSpent) }} XAF</p>
         <p class="text-sm text-surface-500">Total dépensé</p>
       </div>
       <div class="card-premium p-6">
         <div class="w-10 h-10 rounded-xl bg-primary-50 flex items-center justify-center mb-3"><CreditCard class="w-5 h-5 text-primary-600" /></div>
-        <p class="text-2xl font-bold text-surface-900">3</p>
+        <p class="text-2xl font-bold text-surface-900">{{ payments.length }}</p>
         <p class="text-sm text-surface-500">Transactions</p>
       </div>
       <div class="card-premium p-6">
         <div class="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center mb-3"><Clock class="w-5 h-5 text-amber-600" /></div>
-        <p class="text-2xl font-bold text-surface-900">1</p>
+        <p class="text-2xl font-bold text-surface-900">{{ pendingCount }}</p>
         <p class="text-sm text-surface-500">En attente</p>
       </div>
     </div>
@@ -83,6 +107,13 @@ const statusConfig: Record<string, { label: string; color: string; icon: typeof 
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <div v-if="loading" class="px-6 py-12 text-center text-sm text-surface-500">Chargement…</div>
+      <div v-else-if="!payments.length" class="px-6 py-16 text-center">
+        <DollarSign class="w-10 h-10 text-surface-300 mx-auto mb-3" />
+        <p class="font-semibold text-surface-900 mb-1">Aucune transaction</p>
+        <p class="text-sm text-surface-500">Vos achats de billets apparaîtront ici.</p>
       </div>
     </div>
   </div>

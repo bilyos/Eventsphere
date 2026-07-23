@@ -1,16 +1,28 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { toast } from 'vue-sonner'
 import {
   MapPin, Tag, DollarSign,
-  Globe, Lock, ArrowLeft, ArrowRight, Loader2, Check, Upload, Trash2
+  Globe, Lock, ArrowLeft, ArrowRight, Loader2, Check, Upload, Trash2,
 } from 'lucide-vue-next'
+import { useEventsStore, type EventFormValues, type TicketTypeFormValues } from '@/stores/events'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
 const route = useRoute()
+const store = useEventsStore()
+const auth = useAuthStore()
+const { categories } = storeToRefs(store)
+
+const eventId = route.params.id as string
 const currentStep = ref(0)
 const loading = ref(false)
+const uploading = ref(false)
+const initializing = ref(true)
+const notFound = ref(false)
+const bannerInput = ref<HTMLInputElement | null>(null)
 
 const steps = [
   { label: 'Informations', icon: Tag },
@@ -19,28 +31,37 @@ const steps = [
   { label: 'Publication', icon: Globe },
 ]
 
-const form = ref({
-  title: 'Douala Tech Summit 2026',
-  description: 'Le plus grand événement tech du Cameroun. Rejoignez plus de 2000 participants pour une journée d\'inspiration, de networking et d\'innovation.',
-  category: 'Conférence',
-  bannerUrl: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?w=800',
-  venue: 'Palais des Congrès',
-  address: 'Boulevard de la Liberté, Douala',
-  startDate: '2026-07-15',
-  startTime: '09:00',
-  endDate: '2026-07-15',
-  endTime: '18:00',
-  capacity: 2000,
+const form = ref<EventFormValues>({
+  title: '',
+  description: '',
+  categoryId: '',
+  bannerUrl: '',
+  venue: '',
+  address: '',
+  startDate: '',
+  startTime: '',
+  endDate: '',
+  endTime: '',
+  capacity: 100,
   isPublic: true,
   isFree: false,
-  tags: 'tech, innovation, networking, startup',
+  tags: '',
 })
 
-const ticketTypes = ref([
-  { name: 'Standard', price: 15000, quantity: 1500, description: 'Accès général, déjeuner inclus' },
-  { name: 'VIP', price: 50000, quantity: 300, description: 'Accès VIP, déjeuner premium, networking exclusif' },
-  { name: 'Early Bird', price: 10000, quantity: 200, description: 'Tarif réduit, places limitées' },
-])
+const ticketTypes = ref<TicketTypeFormValues[]>([])
+
+const categoryLabel = computed(
+  () => categories.value.find(c => c.id === form.value.categoryId)?.name ?? '',
+)
+
+function splitDate(iso: string) {
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return {
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+  }
+}
 
 function addTicketType() {
   ticketTypes.value.push({ name: '', price: 0, quantity: 50, description: '' })
@@ -50,7 +71,35 @@ function removeTicketType(index: number) {
   ticketTypes.value.splice(index, 1)
 }
 
+function validateStep(step: number): string | null {
+  const f = form.value
+  if (step === 0) {
+    if (!f.title.trim()) return 'Le titre est obligatoire'
+    if (!f.categoryId) return 'Choisissez une catégorie'
+    if (!f.description.trim()) return 'La description est obligatoire'
+  }
+  if (step === 1) {
+    if (!f.startDate || !f.startTime) return 'La date et l\'heure de début sont obligatoires'
+    if (!f.endDate || !f.endTime) return 'La date et l\'heure de fin sont obligatoires'
+    if (new Date(`${f.endDate}T${f.endTime}`) <= new Date(`${f.startDate}T${f.startTime}`)) {
+      return 'La fin doit être après le début'
+    }
+    if (!f.venue.trim()) return 'Le nom du lieu est obligatoire'
+    if (!f.address.trim()) return 'L\'adresse est obligatoire'
+  }
+  if (step === 2 && !f.isFree) {
+    const valid = ticketTypes.value.filter(t => t.name.trim() && t.quantity > 0)
+    if (!valid.length) return 'Ajoutez au moins un type de billet valide'
+  }
+  return null
+}
+
 function nextStep() {
+  const error = validateStep(currentStep.value)
+  if (error) {
+    toast.error(error)
+    return
+  }
   if (currentStep.value < steps.length - 1) currentStep.value++
 }
 
@@ -58,17 +107,90 @@ function prevStep() {
   if (currentStep.value > 0) currentStep.value--
 }
 
-async function handleSave() {
-  loading.value = true
-  await new Promise(r => setTimeout(r, 1500))
-  loading.value = false
-  toast.success('Événement mis à jour avec succès !')
-  router.push('/dashboard/events')
+async function onBannerSelected(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file || !auth.user) return
+  if (file.size > 5 * 1024 * 1024) {
+    toast.error('Image trop lourde (5 Mo maximum)')
+    return
+  }
+  uploading.value = true
+  try {
+    form.value.bannerUrl = await store.uploadBanner(file, auth.user.id)
+    toast.success('Bannière téléversée')
+  } catch (err: unknown) {
+    toast.error(err instanceof Error ? err.message : 'Téléversement impossible')
+  } finally {
+    uploading.value = false
+  }
 }
 
-const categories = [
-  'Conférence', 'Concert', 'Workshop', 'Gala', 'Sport', 'Art & Culture', 'Networking', 'Formation'
-]
+async function handleSave() {
+  for (let i = 0; i < steps.length - 1; i++) {
+    const error = validateStep(i)
+    if (error) {
+      currentStep.value = i
+      toast.error(error)
+      return
+    }
+  }
+  loading.value = true
+  try {
+    const types = form.value.isFree
+      ? [{ ...(ticketTypes.value[0] ?? {}), name: 'Entrée libre', price: 0, quantity: form.value.capacity, description: '' }]
+      : ticketTypes.value
+    await store.updateEvent(eventId, form.value, types)
+    toast.success('Événement mis à jour avec succès !')
+    router.push('/dashboard/events')
+  } catch (err: unknown) {
+    toast.error(err instanceof Error ? err.message : 'Mise à jour impossible')
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(async () => {
+  if (!auth.initialized) await auth.initialize()
+  await store.fetchCategories()
+  try {
+    const event = await store.fetchEvent(eventId)
+    if (!event) {
+      notFound.value = true
+      return
+    }
+    const start = splitDate(event.start_date)
+    const end = splitDate(event.end_date)
+    form.value = {
+      title: event.title,
+      description: event.description,
+      categoryId: event.category_id ?? '',
+      bannerUrl: event.banner_url ?? '',
+      venue: event.venue_name,
+      address: event.venue_address,
+      startDate: start.date,
+      startTime: start.time,
+      endDate: end.date,
+      endTime: end.time,
+      capacity: event.capacity,
+      isPublic: event.is_public,
+      isFree: event.is_free,
+      tags: (event.tags ?? []).join(', '),
+    }
+    ticketTypes.value = (event.ticket_types ?? []).map(t => ({
+      id: t.id,
+      name: t.name,
+      price: Number(t.price),
+      quantity: t.quantity,
+      description: t.description ?? '',
+    }))
+    if (!ticketTypes.value.length) addTicketType()
+  } catch (err: unknown) {
+    notFound.value = true
+    toast.error(err instanceof Error ? err.message : 'Chargement impossible')
+  } finally {
+    initializing.value = false
+  }
+})
 </script>
 
 <template>
@@ -81,6 +203,18 @@ const categories = [
       </div>
     </div>
 
+    <div v-if="initializing" class="card-premium p-16 text-center text-surface-500">
+      <Loader2 class="w-6 h-6 mx-auto mb-3 animate-spin text-primary-500" />
+      Chargement de l'événement…
+    </div>
+
+    <div v-else-if="notFound" class="card-premium p-16 text-center">
+      <p class="font-semibold text-surface-900 mb-2">Événement introuvable</p>
+      <p class="text-sm text-surface-500 mb-6">Il a peut-être été supprimé, ou vous n'y avez pas accès.</p>
+      <button @click="router.push('/dashboard/events')" class="btn-primary">Retour à mes événements</button>
+    </div>
+
+    <template v-else>
     <!-- Progress -->
     <div class="flex items-center gap-2">
       <div v-for="(step, index) in steps" :key="step.label" class="flex items-center gap-2 flex-1">
@@ -101,9 +235,9 @@ const categories = [
       </div>
       <div>
         <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">Catégorie *</label>
-        <select v-model="form.category" class="input-field">
+        <select v-model="form.categoryId" class="input-field">
           <option value="">Sélectionner une catégorie</option>
-          <option v-for="cat in categories" :key="cat" :value="cat">{{ cat }}</option>
+          <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
         </select>
       </div>
       <div>
@@ -118,10 +252,16 @@ const categories = [
             <Trash2 class="w-4 h-4" />
           </button>
         </div>
-        <div v-else class="border-2 border-dashed border-surface-200 rounded-xl p-10 text-center hover:border-primary-400 transition-colors cursor-pointer">
-          <Upload class="w-8 h-8 text-surface-400 mx-auto mb-3" />
-          <p class="text-sm text-surface-500">Glissez une image ou <span class="text-primary-600 font-semibold">parcourez</span></p>
+        <div
+          v-else
+          @click="bannerInput?.click()"
+          class="border-2 border-dashed border-surface-200 rounded-xl p-10 text-center hover:border-primary-400 transition-colors cursor-pointer"
+        >
+          <Loader2 v-if="uploading" class="w-8 h-8 text-primary-500 mx-auto mb-3 animate-spin" />
+          <Upload v-else class="w-8 h-8 text-surface-400 mx-auto mb-3" />
+          <p class="text-sm text-surface-500">Cliquez pour choisir une image</p>
         </div>
+        <input ref="bannerInput" type="file" accept="image/*" class="hidden" @change="onBannerSelected" />
       </div>
       <div>
         <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">Tags</label>
@@ -226,7 +366,7 @@ const categories = [
         <h3 class="font-bold text-surface-900 dark:text-surface-100 mb-4">Résumé</h3>
         <dl class="space-y-3 text-sm">
           <div class="flex justify-between"><dt class="text-surface-500">Titre</dt><dd class="font-medium text-surface-900 dark:text-surface-100">{{ form.title || '—' }}</dd></div>
-          <div class="flex justify-between"><dt class="text-surface-500">Catégorie</dt><dd class="font-medium text-surface-900 dark:text-surface-100">{{ form.category || '—' }}</dd></div>
+          <div class="flex justify-between"><dt class="text-surface-500">Catégorie</dt><dd class="font-medium text-surface-900 dark:text-surface-100">{{ categoryLabel || '—' }}</dd></div>
           <div class="flex justify-between"><dt class="text-surface-500">Date</dt><dd class="font-medium text-surface-900 dark:text-surface-100">{{ form.startDate || '—' }}</dd></div>
           <div class="flex justify-between"><dt class="text-surface-500">Lieu</dt><dd class="font-medium text-surface-900 dark:text-surface-100">{{ form.venue || '—' }}</dd></div>
           <div class="flex justify-between"><dt class="text-surface-500">Capacité</dt><dd class="font-medium text-surface-900 dark:text-surface-100">{{ form.capacity }}</dd></div>
@@ -250,5 +390,6 @@ const categories = [
         <template v-else><Check class="w-4 h-4" /> Enregistrer les modifications</template>
       </button>
     </div>
+    </template>
   </div>
 </template>

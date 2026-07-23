@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { supabase } from '@/lib/supabase'
-import type { Profile, UserRole } from '@/types'
+import type { Profile, ProfileUpdate, UserRole } from '@/types'
 import type { User, Session } from '@supabase/supabase-js'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -88,11 +88,11 @@ export const useAuthStore = defineStore('auth', () => {
     if (error) throw error
   }
 
-  async function updateProfile(updates: Partial<Profile>) {
+  async function updateProfile(updates: ProfileUpdate) {
     if (!user.value) return
     const { data, error } = await supabase
       .from('profiles')
-      .update(updates as any)
+      .update(updates)
       .eq('id', user.value.id)
       .select()
       .single()

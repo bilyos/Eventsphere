@@ -1,19 +1,109 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed, onMounted, ref, shallowRef } from 'vue'
 import VueApexCharts from 'vue3-apexcharts'
+import type { ApexOptions } from 'apexcharts'
 import {
   TrendingUp, Users, Ticket, DollarSign, Calendar,
-  ArrowUpRight, ArrowDownRight, Eye, QrCode, Clock
+  ArrowUpRight, ArrowDownRight, QrCode, Clock,
 } from 'lucide-vue-next'
+import { supabase } from '@/lib/supabase'
+import { useEventsStore } from '@/stores/events'
+import { useAuthStore } from '@/stores/auth'
+import { formatDate } from '@/lib/utils'
+import type { Event, Payment, Ticket as TicketRow } from '@/types'
 
-const stats = ref([
-  { label: 'Revenus totaux', value: '2 450 000 XAF', change: '+12.5%', up: true, icon: DollarSign, color: 'text-emerald-600 bg-emerald-50' },
-  { label: 'Tickets vendus', value: '1 847', change: '+8.2%', up: true, icon: Ticket, color: 'text-primary-600 bg-primary-50' },
-  { label: 'Participants', value: '1 523', change: '+15.3%', up: true, icon: Users, color: 'text-cyan-600 bg-cyan-50' },
-  { label: 'Événements actifs', value: '12', change: '-2', up: false, icon: Calendar, color: 'text-amber-600 bg-amber-50' },
-])
+const store = useEventsStore()
+const auth = useAuthStore()
 
-const revenueChartOptions = computed(() => ({
+const loading = ref(true)
+// shallowRef : ces collections sont remplacées en bloc, et le typage profond de
+// `ref` sur ces objets imbriqués dépasse la limite d'instanciation de TypeScript.
+const payments = shallowRef<Payment[]>([])
+const tickets = shallowRef<TicketRow[]>([])
+const checkins = shallowRef<{ scanned_at: string; event_id: string }[]>([])
+
+const myEvents = computed<Event[]>(() => store.myEvents)
+
+const MONTH_LABELS = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Jun', 'Jui', 'Aoû', 'Sep', 'Oct', 'Nov', 'Déc']
+
+/** Les 6 derniers mois, du plus ancien au plus récent. */
+const lastSixMonths = computed(() => {
+  const out: { key: string; label: string }[] = []
+  const now = new Date()
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    out.push({ key: `${d.getFullYear()}-${d.getMonth()}`, label: MONTH_LABELS[d.getMonth()] })
+  }
+  return out
+})
+
+function monthKey(iso: string) {
+  const d = new Date(iso)
+  return `${d.getFullYear()}-${d.getMonth()}`
+}
+
+const completedPayments = computed<Payment[]>(() => payments.value.filter(p => p.status === 'completed'))
+
+const totalRevenue = computed(() => completedPayments.value.reduce((s, p) => s + Number(p.amount), 0))
+const ticketsSold = computed(() => tickets.value.length)
+const uniqueAttendees = computed(() => new Set(tickets.value.map(t => t.attendee_id)).size)
+const activeEvents = computed(
+  () => myEvents.value.filter(e => e.status === 'published' && new Date(e.end_date) >= new Date()).length,
+)
+
+/** Variation du mois en cours par rapport au mois précédent. */
+function monthOverMonth(values: number[]) {
+  const current = values[values.length - 1] ?? 0
+  const previous = values[values.length - 2] ?? 0
+  if (!previous) return { change: current ? '+100%' : '—', up: current >= 0 }
+  const delta = ((current - previous) / previous) * 100
+  return { change: `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`, up: delta >= 0 }
+}
+
+const revenueByMonth = computed(() =>
+  lastSixMonths.value.map(m =>
+    completedPayments.value
+      .filter(p => monthKey(p.created_at) === m.key)
+      .reduce((s, p) => s + Number(p.amount), 0),
+  ),
+)
+
+const ticketsByMonth = computed(() =>
+  lastSixMonths.value.map(m => tickets.value.filter(t => monthKey(t.created_at) === m.key).length),
+)
+
+const stats = computed(() => {
+  const revenueTrend = monthOverMonth(revenueByMonth.value)
+  const ticketTrend = monthOverMonth(ticketsByMonth.value)
+  return [
+    {
+      label: 'Revenus totaux',
+      value: new Intl.NumberFormat('fr-FR').format(totalRevenue.value) + ' XAF',
+      change: revenueTrend.change, up: revenueTrend.up,
+      icon: DollarSign, color: 'text-emerald-600 bg-emerald-50',
+    },
+    {
+      label: 'Tickets vendus',
+      value: ticketsSold.value.toLocaleString('fr-FR'),
+      change: ticketTrend.change, up: ticketTrend.up,
+      icon: Ticket, color: 'text-primary-600 bg-primary-50',
+    },
+    {
+      label: 'Participants',
+      value: uniqueAttendees.value.toLocaleString('fr-FR'),
+      change: '', up: true,
+      icon: Users, color: 'text-cyan-600 bg-cyan-50',
+    },
+    {
+      label: 'Événements actifs',
+      value: String(activeEvents.value),
+      change: '', up: true,
+      icon: Calendar, color: 'text-amber-600 bg-amber-50',
+    },
+  ]
+})
+
+const revenueChartOptions = computed<ApexOptions>(() => ({
   chart: { type: 'area' as const, toolbar: { show: false }, fontFamily: 'Inter, sans-serif', sparkline: { enabled: false } },
   colors: ['#f97316', '#f59e0b'],
   dataLabels: { enabled: false },
@@ -23,7 +113,7 @@ const revenueChartOptions = computed(() => ({
     gradient: { shadeIntensity: 1, opacityFrom: 0.4, opacityTo: 0.05, stops: [0, 90, 100] },
   },
   xaxis: {
-    categories: ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Jun'],
+    categories: lastSixMonths.value.map(m => m.label),
     labels: { style: { colors: '#71717a', fontSize: '12px' } },
     axisBorder: { show: false },
     axisTicks: { show: false },
@@ -31,25 +121,34 @@ const revenueChartOptions = computed(() => ({
   yaxis: {
     labels: {
       style: { colors: '#71717a', fontSize: '12px' },
-      formatter: (v: number) => (v / 1000).toFixed(0) + 'K',
+      formatter: (v: number) => (v >= 1000 ? (v / 1000).toFixed(0) + 'K' : String(v)),
     },
   },
   grid: { borderColor: '#e4e4e7', strokeDashArray: 4, padding: { left: 8, right: 8 } },
-  tooltip: {
-    y: { formatter: (v: number) => v.toLocaleString('fr-FR') + ' XAF' },
-  },
+  tooltip: { y: { formatter: (v: number) => v.toLocaleString('fr-FR') } },
   legend: { position: 'top', horizontalAlign: 'right', fontSize: '12px', markers: { size: 6, offsetX: -4 } },
 }))
 
-const revenueSeries = ref([
-  { name: 'Revenus', data: [320000, 450000, 380000, 520000, 610000, 490000] },
-  { name: 'Tickets', data: [180000, 220000, 250000, 310000, 380000, 350000] },
+const revenueSeries = computed(() => [
+  { name: 'Revenus (XAF)', data: revenueByMonth.value },
+  { name: 'Billets vendus', data: ticketsByMonth.value },
 ])
 
-const ticketTypesOptions = computed(() => ({
+/** Répartition des ventes par type de billet, tous événements confondus. */
+const ticketTypeBreakdown = computed(() => {
+  const totals = new Map<string, number>()
+  for (const t of tickets.value) {
+    const name = t.ticket_type?.name ?? 'Autre'
+    totals.set(name, (totals.get(name) ?? 0) + 1)
+  }
+  const entries = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+  return { labels: entries.map(e => e[0]), values: entries.map(e => e[1]) }
+})
+
+const ticketTypesOptions = computed<ApexOptions>(() => ({
   chart: { type: 'donut' as const, fontFamily: 'Inter, sans-serif' },
-  colors: ['#f97316', '#06b6d4', '#ec4899', '#f59e0b'],
-  labels: ['Standard', 'VIP', 'Early Bird', 'Groupe'],
+  colors: ['#f97316', '#06b6d4', '#ec4899', '#f59e0b', '#8b5cf6', '#10b981'],
+  labels: ticketTypeBreakdown.value.labels,
   dataLabels: { enabled: false },
   plotOptions: {
     pie: {
@@ -57,8 +156,10 @@ const ticketTypesOptions = computed(() => ({
         size: '70%',
         labels: {
           show: true,
-          total: { show: true, label: 'Total', fontSize: '14px', color: '#71717a',
-            formatter: (w: any) => w.globals.seriesTotals.reduce((a: number, b: number) => a + b, 0).toString()
+          total: {
+            show: true, label: 'Total', fontSize: '14px', color: '#71717a',
+            formatter: (w: { globals: { seriesTotals: number[] } }) =>
+              w.globals.seriesTotals.reduce((a, b) => a + b, 0).toString(),
           },
           value: { fontSize: '20px', fontWeight: '700', color: '#18181b' },
         },
@@ -69,17 +170,27 @@ const ticketTypesOptions = computed(() => ({
   stroke: { width: 3, colors: ['#fff'] },
 }))
 
-const ticketTypesSeries = ref([980, 420, 310, 137])
+const ticketTypesSeries = computed(() => ticketTypeBreakdown.value.values)
 
-const weeklyCheckinsOptions = computed(() => ({
+/** Check-ins des 7 derniers jours. */
+const lastSevenDays = computed(() => {
+  const out: { key: string; label: string }[] = []
+  const days = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam']
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date()
+    d.setDate(d.getDate() - i)
+    out.push({ key: d.toISOString().slice(0, 10), label: days[d.getDay()] })
+  }
+  return out
+})
+
+const weeklyCheckinsOptions = computed<ApexOptions>(() => ({
   chart: { type: 'bar' as const, toolbar: { show: false }, fontFamily: 'Inter, sans-serif' },
   colors: ['#ffedd5', '#fed7aa', '#fdba74', '#fb923c', '#f97316', '#ea580c', '#c2410c'],
-  plotOptions: {
-    bar: { borderRadius: 6, columnWidth: '55%', distributed: true },
-  },
+  plotOptions: { bar: { borderRadius: 6, columnWidth: '55%', distributed: true } },
   dataLabels: { enabled: false },
   xaxis: {
-    categories: ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'],
+    categories: lastSevenDays.value.map(d => d.label),
     labels: { style: { colors: '#71717a', fontSize: '12px' } },
     axisBorder: { show: false },
     axisTicks: { show: false },
@@ -90,28 +201,82 @@ const weeklyCheckinsOptions = computed(() => ({
   legend: { show: false },
 }))
 
-const weeklyCheckinsSeries = ref([{ name: 'Check-ins', data: [45, 68, 52, 89, 112, 186, 143] }])
-
-const recentActivity = ref([
-  { type: 'ticket', message: 'Marie Nguemo a acheté 2 tickets VIP pour Douala Tech Summit', time: 'Il y a 3 min', icon: Ticket, color: 'text-primary-600 bg-primary-50' },
-  { type: 'checkin', message: 'Jean-Pierre a scanné son QR code à Afro Music Festival', time: 'Il y a 12 min', icon: QrCode, color: 'text-emerald-600 bg-emerald-50' },
-  { type: 'event', message: 'Startup Weekend Cameroun a atteint 80% de capacité', time: 'Il y a 25 min', icon: TrendingUp, color: 'text-amber-600 bg-amber-50' },
-  { type: 'ticket', message: 'Aminata Diallo a acheté 1 ticket Standard', time: 'Il y a 1h', icon: Ticket, color: 'text-primary-600 bg-primary-50' },
-  { type: 'view', message: 'Gala Étoiles d\'Afrique a reçu 250 vues aujourd\'hui', time: 'Il y a 2h', icon: Eye, color: 'text-cyan-600 bg-cyan-50' },
+const weeklyCheckinsSeries = computed(() => [
+  {
+    name: 'Check-ins',
+    data: lastSevenDays.value.map(
+      d => checkins.value.filter(c => c.scanned_at.slice(0, 10) === d.key).length,
+    ),
+  },
 ])
 
-const topEvents = ref([
-  { name: 'Douala Tech Summit 2026', sold: 1250, capacity: 2000, revenue: '1 200 000 XAF' },
-  { name: 'Afro Music Festival', sold: 5000, capacity: 8000, revenue: '850 000 XAF' },
-  { name: 'Gala Étoiles d\'Afrique', sold: 350, capacity: 400, revenue: '400 000 XAF' },
-])
+const recentActivity = computed(() => {
+  const fromTickets = tickets.value.slice(0, 6).map(t => ({
+    key: `t-${t.id}`,
+    at: t.created_at,
+    message: `${t.attendee?.full_name || 'Un participant'} a réservé un billet « ${t.ticket_type?.name ?? '—'} »`,
+    icon: Ticket,
+    color: 'text-primary-600 bg-primary-50',
+  }))
+  const fromCheckins = checkins.value.slice(0, 6).map((c, i) => ({
+    key: `c-${c.event_id}-${i}`,
+    at: c.scanned_at,
+    message: `Check-in validé sur ${myEvents.value.find(e => e.id === c.event_id)?.title ?? 'un événement'}`,
+    icon: QrCode,
+    color: 'text-emerald-600 bg-emerald-50',
+  }))
+  return [...fromTickets, ...fromCheckins]
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, 6)
+    .map(a => ({ ...a, time: formatDate(a.at, 'relative') }))
+})
+
+const topEvents = computed(() =>
+  myEvents.value
+    .map(e => ({
+      name: e.title,
+      sold: store.soldCount(e),
+      capacity: e.capacity || 1,
+      revenue: new Intl.NumberFormat('fr-FR').format(store.revenue(e)) + ' XAF',
+    }))
+    .sort((a, b) => b.sold - a.sold)
+    .slice(0, 3),
+)
+
+onMounted(async () => {
+  if (!auth.initialized) await auth.initialize()
+  if (!auth.user) return
+  try {
+    await store.fetchMyEvents(auth.user.id)
+    const eventIds = myEvents.value.map(e => e.id)
+    if (!eventIds.length) return
+
+    const [paymentsRes, ticketsRes, checkinsRes] = await Promise.all([
+      supabase.from('payments').select('*').in('event_id', eventIds),
+      supabase
+        .from('tickets')
+        .select('*, ticket_type:ticket_types(*), attendee:profiles!attendee_id(*)')
+        .in('event_id', eventIds)
+        .order('created_at', { ascending: false }),
+      supabase.from('checkins').select('scanned_at, event_id').in('event_id', eventIds),
+    ])
+
+    payments.value = (paymentsRes.data ?? []) as unknown as Payment[]
+    tickets.value = (ticketsRes.data ?? []) as unknown as TicketRow[]
+    checkins.value = checkinsRes.data ?? []
+  } finally {
+    loading.value = false
+  }
+})
 </script>
 
 <template>
   <div class="space-y-8">
     <!-- Welcome -->
     <div>
-      <h1 class="text-2xl font-bold text-surface-900 dark:text-surface-100">Bonjour ! 👋</h1>
+      <h1 class="text-2xl font-bold text-surface-900 dark:text-surface-100">
+        Bonjour{{ auth.profile?.full_name ? ` ${auth.profile.full_name}` : '' }} ! 👋
+      </h1>
       <p class="text-surface-500 dark:text-surface-400 mt-1">Voici un aperçu de votre activité.</p>
     </div>
 
@@ -122,7 +287,7 @@ const topEvents = ref([
           <div :class="['w-11 h-11 rounded-xl flex items-center justify-center', stat.color]">
             <component :is="stat.icon" class="w-5 h-5" />
           </div>
-          <div :class="['flex items-center gap-1 text-xs font-semibold', stat.up ? 'text-emerald-600' : 'text-red-500']">
+          <div v-if="stat.change" :class="['flex items-center gap-1 text-xs font-semibold', stat.up ? 'text-emerald-600' : 'text-red-500']">
             <component :is="stat.up ? ArrowUpRight : ArrowDownRight" class="w-3.5 h-3.5" />
             {{ stat.change }}
           </div>
@@ -167,8 +332,11 @@ const topEvents = ref([
           <h2 class="text-lg font-bold text-surface-900">Activité récente</h2>
           <button class="text-sm text-primary-600 font-semibold hover:text-primary-700">Voir tout</button>
         </div>
+        <p v-if="!recentActivity.length" class="text-sm text-surface-500 py-6 text-center">
+          Aucune activité pour le moment.
+        </p>
         <div class="space-y-4">
-          <div v-for="activity in recentActivity" :key="activity.message" class="flex items-start gap-4">
+          <div v-for="activity in recentActivity" :key="activity.key" class="flex items-start gap-4">
             <div :class="['w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0', activity.color]">
               <component :is="activity.icon" class="w-4 h-4" />
             </div>
@@ -186,6 +354,9 @@ const topEvents = ref([
     <!-- Top Events -->
     <div class="card-premium p-6">
       <h2 class="text-lg font-bold text-surface-900 mb-6">Top événements</h2>
+      <p v-if="!topEvents.length" class="text-sm text-surface-500 py-6 text-center">
+        Créez un événement pour voir vos statistiques ici.
+      </p>
       <div class="grid sm:grid-cols-3 gap-6">
         <div v-for="(event, i) in topEvents" :key="event.name" class="space-y-3">
           <div class="flex items-center gap-3">

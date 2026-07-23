@@ -1,74 +1,52 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import { Search, MapPin, Calendar, Users, Filter, X, SlidersHorizontal } from 'lucide-vue-next'
+import { storeToRefs } from 'pinia'
+import { Search, MapPin, Calendar, Users, SlidersHorizontal } from 'lucide-vue-next'
+import { useEventsStore } from '@/stores/events'
+import { formatDate } from '@/lib/utils'
+import type { Event } from '@/types'
+
+const store = useEventsStore()
+const { events, categories: dbCategories, loading } = storeToRefs(store)
 
 const searchQuery = ref('')
 const selectedCategory = ref('')
 const showFilters = ref(false)
 
-const categories = [
+const categories = computed(() => [
   { id: '', name: 'Toutes' },
-  { id: 'conference', name: 'Conférences' },
-  { id: 'concert', name: 'Concerts' },
-  { id: 'workshop', name: 'Workshops' },
-  { id: 'gala', name: 'Galas' },
-  { id: 'sport', name: 'Sport' },
-  { id: 'art', name: 'Art & Culture' },
-]
-
-const events = ref([
-  {
-    id: '1', slug: 'douala-tech-summit-2026', title: 'Douala Tech Summit 2026',
-    image: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?w=600&h=400&fit=crop',
-    date: '15 Juil 2026', location: 'Palais des Congrès, Douala', price: 15000, currency: 'XAF',
-    category: 'conference', categoryLabel: 'Conférence', attendees: 1250, capacity: 2000,
-    description: 'Le plus grand événement tech du Cameroun avec +50 speakers internationaux.',
-  },
-  {
-    id: '2', slug: 'afro-music-festival', title: 'Afro Music Festival',
-    image: 'https://images.unsplash.com/photo-1459749411175-04bf5292ceea?w=600&h=400&fit=crop',
-    date: '22 Juil 2026', location: 'Stade Omnisports, Yaoundé', price: 10000, currency: 'XAF',
-    category: 'concert', categoryLabel: 'Concert', attendees: 5000, capacity: 8000,
-    description: 'Festival de musique afro avec les plus grands artistes du continent.',
-  },
-  {
-    id: '3', slug: 'startup-weekend-cameroun', title: 'Startup Weekend Cameroun',
-    image: 'https://images.unsplash.com/photo-1515187029135-18ee286d815b?w=600&h=400&fit=crop',
-    date: '5 Août 2026', location: 'Hub Innovation, Douala', price: 0, currency: 'XAF',
-    category: 'workshop', categoryLabel: 'Workshop', attendees: 200, capacity: 250,
-    description: '54 heures pour transformer votre idée en startup.',
-  },
-  {
-    id: '4', slug: 'gala-etoiles-afrique', title: 'Gala Étoiles d\'Afrique',
-    image: 'https://images.unsplash.com/photo-1519671482749-fd09be7ccebf?w=600&h=400&fit=crop',
-    date: '18 Août 2026', location: 'Hôtel Hilton, Yaoundé', price: 50000, currency: 'XAF',
-    category: 'gala', categoryLabel: 'Gala', attendees: 350, capacity: 400,
-    description: 'Soirée de gala de charité pour l\'éducation des enfants.',
-  },
-  {
-    id: '5', slug: 'marathon-douala-2026', title: 'Marathon de Douala 2026',
-    image: 'https://images.unsplash.com/photo-1513593771513-7b58b6c4af38?w=600&h=400&fit=crop',
-    date: '12 Sep 2026', location: 'Boulevard de la Liberté, Douala', price: 5000, currency: 'XAF',
-    category: 'sport', categoryLabel: 'Sport', attendees: 3000, capacity: 5000,
-    description: 'Courez les 42km à travers la ville de Douala.',
-  },
-  {
-    id: '6', slug: 'expo-art-contemporain', title: 'Expo Art Contemporain Africain',
-    image: 'https://images.unsplash.com/photo-1578926288207-a90a5366759d?w=600&h=400&fit=crop',
-    date: '1 Oct 2026', location: 'Musée National, Yaoundé', price: 3000, currency: 'XAF',
-    category: 'art', categoryLabel: 'Art & Culture', attendees: 800, capacity: 1000,
-    description: 'Les meilleurs artistes contemporains africains réunis.',
-  },
+  ...dbCategories.value.map(c => ({ id: c.id, name: c.name })),
 ])
 
-const filteredEvents = computed(() => {
-  return events.value.filter(e => {
-    const matchesSearch = !searchQuery.value || e.title.toLowerCase().includes(searchQuery.value.toLowerCase())
-    const matchesCategory = !selectedCategory.value || e.category === selectedCategory.value
+const FALLBACK_BANNER = 'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=600&h=400&fit=crop'
+
+/** Projection des événements Supabase vers les champs affichés par la carte. */
+const cards = computed(() =>
+  events.value.map((e: Event) => ({
+    id: e.id,
+    slug: e.slug,
+    title: e.title,
+    description: e.short_description || e.description,
+    image: e.banner_url || FALLBACK_BANNER,
+    date: formatDate(e.start_date),
+    location: [e.venue_name, e.venue_address].filter(Boolean).join(', '),
+    price: store.minPrice(e),
+    categoryId: e.category_id ?? '',
+    categoryLabel: e.category?.name ?? 'Événement',
+    attendees: store.soldCount(e),
+    capacity: e.capacity,
+  })),
+)
+
+const filteredEvents = computed(() =>
+  cards.value.filter(e => {
+    const q = searchQuery.value.toLowerCase()
+    const matchesSearch = !q || e.title.toLowerCase().includes(q) || e.location.toLowerCase().includes(q)
+    const matchesCategory = !selectedCategory.value || e.categoryId === selectedCategory.value
     return matchesSearch && matchesCategory
-  })
-})
+  }),
+)
 
 function formatPrice(price: number) {
   if (price === 0) return 'Gratuit'
@@ -76,8 +54,13 @@ function formatPrice(price: number) {
 }
 
 function fillPercent(attendees: number, capacity: number) {
-  return Math.round((attendees / capacity) * 100)
+  if (!capacity) return 0
+  return Math.min(100, Math.round((attendees / capacity) * 100))
 }
+
+onMounted(async () => {
+  await Promise.all([store.fetchCategories(), store.fetchEvents()])
+})
 </script>
 
 <template>
@@ -129,8 +112,20 @@ function fillPercent(attendees: number, capacity: number) {
       <!-- Results count -->
       <p class="text-sm text-surface-500 mb-6">{{ filteredEvents.length }} événement{{ filteredEvents.length > 1 ? 's' : '' }} trouvé{{ filteredEvents.length > 1 ? 's' : '' }}</p>
 
+      <!-- Loading skeletons -->
+      <div v-if="loading" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div v-for="n in 6" :key="n" class="card-premium overflow-hidden animate-pulse">
+          <div class="h-52 bg-surface-100" />
+          <div class="p-5 space-y-3">
+            <div class="h-5 bg-surface-100 rounded w-3/4" />
+            <div class="h-4 bg-surface-100 rounded" />
+            <div class="h-4 bg-surface-100 rounded w-1/2" />
+          </div>
+        </div>
+      </div>
+
       <!-- Events grid -->
-      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div v-else class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
         <RouterLink
           v-for="event in filteredEvents"
           :key="event.id"
@@ -177,7 +172,7 @@ function fillPercent(attendees: number, capacity: number) {
       </div>
 
       <!-- Empty state -->
-      <div v-if="filteredEvents.length === 0" class="text-center py-20">
+      <div v-if="!loading && filteredEvents.length === 0" class="text-center py-20">
         <div class="w-20 h-20 mx-auto rounded-2xl bg-surface-100 flex items-center justify-center mb-6">
           <Search class="w-10 h-10 text-surface-300" />
         </div>

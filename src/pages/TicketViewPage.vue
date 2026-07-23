@@ -1,50 +1,91 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, RouterLink } from 'vue-router'
 import QRCode from 'qrcode'
-import { Ticket, Calendar, MapPin, User, Download, CheckCircle } from 'lucide-vue-next'
+import { Ticket, Calendar, MapPin, User, Download, CheckCircle, XCircle, Clock } from 'lucide-vue-next'
+import { useTicketsStore } from '@/stores/tickets'
+import { useAuthStore } from '@/stores/auth'
+import { formatDate } from '@/lib/utils'
+import type { Ticket as TicketRow } from '@/types'
 
-const ticket = ref({
-  id: 'TKT-001',
-  event: 'Douala Tech Summit 2026',
-  type: 'VIP',
-  date: '15 Juillet 2026',
-  time: '09:00 - 18:00',
-  location: 'Palais des Congrès, Douala',
-  holder: 'Richard Ty',
-  status: 'valid',
-  qrCode: 'EVS-VIP-001-2026',
-})
+const route = useRoute()
+const store = useTicketsStore()
+const auth = useAuthStore()
 
+const loading = ref(true)
+const row = ref<TicketRow | null>(null)
 const qrDataUrl = ref('')
 
-onMounted(async () => {
-  const data = JSON.stringify({
-    ticketId: ticket.value.id,
-    code: ticket.value.qrCode,
-    event: ticket.value.event,
-    type: ticket.value.type,
-  })
-  qrDataUrl.value = await QRCode.toDataURL(data, {
-    width: 320,
-    margin: 2,
-    color: { dark: '#18181b', light: '#ffffff' },
-    errorCorrectionLevel: 'H',
-  })
+const statusConfig = {
+  valid: { label: 'Valide', color: 'text-emerald-600', icon: CheckCircle },
+  used: { label: 'Déjà utilisé', color: 'text-surface-500', icon: Clock },
+  cancelled: { label: 'Annulé', color: 'text-red-600', icon: XCircle },
+  expired: { label: 'Expiré', color: 'text-amber-600', icon: XCircle },
+}
+
+const ticket = computed(() => {
+  const t = row.value
+  if (!t) return null
+  return {
+    reference: t.qr_code.slice(0, 12),
+    event: t.event?.title ?? 'Événement',
+    type: t.ticket_type?.name ?? 'Billet',
+    date: t.event ? formatDate(t.event.start_date) : '—',
+    time: t.event
+      ? new Date(t.event.start_date).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+      : '—',
+    location: t.event ? [t.event.venue_name, t.event.venue_address].filter(Boolean).join(', ') : '—',
+    holder: t.attendee?.full_name || t.attendee?.email || 'Participant',
+    status: t.status,
+    qrCode: t.qr_code,
+  }
 })
 
 function downloadTicket() {
-  if (!qrDataUrl.value) return
+  if (!qrDataUrl.value || !ticket.value) return
   const link = document.createElement('a')
-  link.download = `${ticket.value.id}-${ticket.value.event.replace(/\s/g, '_')}.png`
+  link.download = `${ticket.value.reference}-${ticket.value.event.replace(/\s/g, '_')}.png`
   link.href = qrDataUrl.value
   link.click()
 }
+
+onMounted(async () => {
+  if (!auth.initialized) await auth.initialize()
+  try {
+    // RLS ne renvoie le billet qu'à son porteur ou à l'organisateur de l'événement.
+    row.value = await store.fetchTicket(route.params.ticketId as string)
+    if (row.value) {
+      qrDataUrl.value = await QRCode.toDataURL(JSON.stringify({ code: row.value.qr_code }), {
+        width: 320,
+        margin: 2,
+        color: { dark: '#18181b', light: '#ffffff' },
+        errorCorrectionLevel: 'H',
+      })
+    }
+  } finally {
+    loading.value = false
+  }
+})
 </script>
 
 <template>
   <div class="min-h-screen bg-surface-50 flex items-center justify-center p-4">
     <div class="w-full max-w-md">
-      <div class="card-premium overflow-hidden">
+      <div v-if="loading" class="card-premium p-16 text-center text-surface-500">
+        Chargement du billet…
+      </div>
+
+      <div v-else-if="!ticket" class="card-premium p-12 text-center">
+        <Ticket class="w-12 h-12 text-surface-300 mx-auto mb-4" />
+        <h1 class="text-lg font-bold text-surface-900 mb-2">Billet inaccessible</h1>
+        <p class="text-sm text-surface-500 mb-6">
+          Ce billet n'existe pas, ou vous devez être connecté avec le compte qui l'a réservé.
+        </p>
+        <RouterLink v-if="!auth.isAuthenticated" to="/auth/login" class="btn-primary">Se connecter</RouterLink>
+        <RouterLink v-else to="/dashboard/tickets" class="btn-primary">Voir mes billets</RouterLink>
+      </div>
+
+      <div v-else class="card-premium overflow-hidden">
         <!-- Header -->
         <div class="gradient-primary p-6 text-white text-center relative overflow-hidden">
           <div class="absolute -top-6 -right-6 w-32 h-32 bg-white/10 rounded-full" />
@@ -87,17 +128,17 @@ function downloadTicket() {
             </div>
           </div>
           <div class="flex items-center gap-3">
-            <CheckCircle class="w-5 h-5 text-emerald-500" />
+            <component :is="statusConfig[ticket.status].icon" class="w-5 h-5 text-emerald-500" />
             <div>
               <p class="text-xs text-surface-500">Statut</p>
-              <p class="font-medium text-emerald-600">Valide</p>
+              <p :class="['font-medium', statusConfig[ticket.status].color]">{{ statusConfig[ticket.status].label }}</p>
             </div>
           </div>
         </div>
 
         <!-- Actions -->
         <div class="p-6 pt-0">
-          <button class="btn-primary w-full" @click="downloadTicket"><Download class="w-4 h-4" /> Télécharger PDF</button>
+          <button class="btn-primary w-full" @click="downloadTicket"><Download class="w-4 h-4" /> Télécharger le QR</button>
         </div>
       </div>
     </div>
